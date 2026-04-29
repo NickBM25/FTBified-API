@@ -64,24 +64,26 @@ def update_player(
     session: Session = Depends(get_session)
 ):
     path = f"{PLAYER_BASE_PATH}/{player_id}.snbt"
-    snbt = get_sftp_file(path)
-    data = parse_snbt(snbt)
-    updated_player = PlayerUpdate.model_validate(data)
 
     player = get_player_from_db(player_id, session)
 
-    if updated_player.player_id != player_id:
+    snbt = get_sftp_file(path)
+    data = parse_snbt(snbt)
+    player_update = PlayerUpdate.model_validate(data)
+
+
+    if player_update.player_id != player_id:
         raise HTTPException(
             status_code=400,
             detail="Player UUID from update request is not the same UUID from requested player"
         )
 
-    updated_player_dict = updated_player.model_dump(
+    player_update_dict = player_update.model_dump(
         exclude={"player_id"},
         exclude_none=True
     )
 
-    if not apply_changes(player, updated_player_dict):
+    if not apply_changes(player, player_update_dict):
         return player
 
     session.add(player)
