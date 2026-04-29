@@ -1,4 +1,6 @@
+from fastapi import HTTPException
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 from dotenv import load_dotenv
 from sqlmodel import Session
@@ -25,13 +27,8 @@ engine = create_engine(
 )
 
 def get_session():
-    with Session(engine) as session:
-        yield session
-
-if __name__ == "__main__":
-    # Test the connection
     try:
-        with engine.connect() as connection:
-            print("Connection successful!")
-    except Exception as e:
-        print(f"Failed to connect: {e}")
+        with Session(engine) as session:
+            yield session
+    except OperationalError:
+        raise HTTPException(status_code=503, detail=f"Database unavailable.")
