@@ -1,122 +1,129 @@
 import json
-from pathlib import Path
 from uuid import UUID
-from fastapi import Depends, HTTPException, Response, APIRouter
+from fastapi import Depends, HTTPException, APIRouter
 from sqlmodel import Session, select
-from models.stats import Stats
-from models.player import Player
-from utilities import snbt_utils, sftp_utils
+from constants import PLAYER_BASE_PATH, STATS_BASE_PATH
+from models.player import Player, PlayerStats, PlayerUpdate
 from database import get_session
+from dependencies import get_player_from_db, get_sftp_file, parse_snbt, apply_changes
 
 router = APIRouter(prefix="/api/v1/players")
 
-@router.get("/", response_model=list[Player], status_code=200)
-def read_players(skip: int = 0, limit: int = 10, session: Session = Depends(get_session)):
-    if limit-skip <= 0:
-        return []
-
-    if limit-skip > 100:
-        raise HTTPException(status_code=400, detail="Maximum limit exceeded. You can only request up to 100 players at a time.")
-
-    return session.exec(select(Player).offset(skip).limit(limit)).all()
-
-
 @router.post("/", response_model=Player, status_code=201)
-def create_player(snbt, session: Session = Depends(get_session)):
-    if not snbt or not snbt.strip():
-        raise HTTPException(status_code=400, detail="SNBT não pode ser vazio")
+def create_player(
+    player_id: UUID,
+    session: Session = Depends(get_session)
+):
+    path = PLAYER_BASE_PATH + str(player_id) + ".snbt"
+    print(path)
+    snbt = get_sftp_file(path)
 
-    nbt = snbt_utils.parse_snbt_file(snbt)
-    json_parsed = snbt_utils.snbt_to_json(nbt)
-    player = Player(**json_parsed)
+    data = parse_snbt(snbt)
+    player = Player.model_validate(data)
 
-    existing = session.exec(select(Player).where(Player.player_id == player.player_id)).first()
+    existing = session.get(Player, player.player_id)
     if existing:
-        raise HTTPException(status_code=409, detail="Player já existe")
+        raise HTTPException(status_code=409, detail="Player already exists")
 
     session.add(player)
     session.commit()
+    session.refresh(player)
+
+    stats_path = STATS_BASE_PATH + str(player_id) + ".json"
+    update_stats(player.player_id, session)
+
     return player
+
+@router.get("/", response_model=list[Player], status_code=200)
+def read_players(
+    offset: int = 0,
+    limit: int = 10,
+    session: Session = Depends(get_session)
+):
+    if limit <= 0 or offset < 0:
+        return []
+
+    if limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum limit exceeded. You can only request up to 100 players at a time."
+        )
+
+    return session.exec(select(Player).offset(offset).limit(limit)).all()
 
 @router.get("/{player_id}", response_model=Player, status_code=200)
-def read_player(player_id: UUID, session: Session = Depends(get_session)):
-    player = session.exec(select(Player).where(Player.player_id == player_id)).first()
-
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-
+def read_player(
+    player_id: UUID,
+    session: Session = Depends(get_session)
+):
+    player = get_player_from_db(player_id, session)
     return player
 
-@router.delete("/{player_id}")
-def delete_player(player_id: UUID, session: Session = Depends(get_session)):
-    player = session.exec(select(Player).where(Player.player_id == player_id)).first()
 
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
+@router.patch("/{player_id}", response_model=Player, status_code=200)
+def update_player(
+    player_id: UUID,
+    session: Session = Depends(get_session)
+):
+    path = PLAYER_BASE_PATH + str(player_id) + ".SNBT"
+    snbt = get_sftp_file(path)
+    data = parse_snbt(snbt)
+    updated_player = PlayerUpdate.model_validate(data)
+
+    player = get_player_from_db(player_id, session)
+
+    if updated_player.player_id != player_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Player UUID from update request is not the same UUID from requested player"
+        )
+
+    updated_player_dict = updated_player.model_dump(
+        exclude={"player_id"},
+        exclude_none=True
+    )
+
+    if not apply_changes(player, updated_player_dict):
+        return player
+
+    session.add(player)
+    session.commit()
+    session.refresh(player)
+    return player
+
+@router.patch("/{player_id}/stats", response_model=Player, status_code=200)
+def update_stats(
+        player_id: UUID,
+        session: Session = Depends(get_session)
+):
+    path = STATS_BASE_PATH + str(player_id) + ".json"
+
+    player = get_player_from_db(player_id, session)
+
+    file = get_sftp_file(path)
+    j = json.loads(file)
+    stats = PlayerStats.model_validate(j | {"player_id": player_id})
+
+    stats_dict = stats.model_dump(
+        exclude={"player_id"},
+        exclude_none=True
+    )
+
+    if not apply_changes(player, stats_dict):
+        return player
+
+    session.add(player)
+    session.commit()
+    session.refresh(player)
+    return player
+
+@router.delete("/{player_id}", status_code=204)
+def delete_player(
+    player_id: UUID,
+    session: Session = Depends(get_session)
+):
+    player = get_player_from_db(player_id, session)
 
     session.delete(player)
     session.commit()
-    return Response(status_code=204)
-
-@router.put("/{player_id}", response_model=Player, status_code=200)
-def update_user(player_id: UUID, snbt: str, session: Session = Depends(get_session)):
-    player = session.exec(select(Player).where(Player.player_id == player_id)).first()
-
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    if not snbt or not snbt.strip():
-        raise HTTPException(status_code=400, detail="SNBT não pode ser vazio")
-
-    nbt = snbt_utils.parse_snbt_file(snbt)
-    json_parsed = snbt_utils.snbt_to_json(nbt)
-    new_data = Player(**json_parsed)
-
-    if new_data.player_id != player_id:
-        raise HTTPException(status_code=400, detail="O UUID do SNBT não corresponde ao UUID da URL")
-
-    new_data_dict = new_data.model_dump(exclude_unset=True, exclude={"player_id"})
-
-    changes = {
-        field: value
-        for field, value in new_data_dict.items()
-        if getattr(player, field) != value
-    }
-
-    if not changes:
-        raise HTTPException(status_code=200, detail="Nenhuma alteração detectada")
-
-    for field, value in changes.items():
-        setattr(player, field, value)
-
-    session.add(player)
-    session.commit()
-    session.refresh(player)
-    return player
-
-@router.put("/stats", response_model=Player, status_code=200)
-def update_stats(path: str, session: Session = Depends(get_session)):
-    uuid = Path(path).stem
-
-    player = session.exec(select(Player).where(Player.player_id == uuid)).first()
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    try:
-        file = sftp_utils.getfile(path)
-    except ConnectionError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    j = json.loads(file)
-    stats = Stats.model_validate(j | {"player_id": uuid})
-
-
-    stats_dict = stats.model_dump(exclude={"player_id"})
-    for field, value in stats_dict.items():
-        setattr(player, field, value)
-        session.add(player)
-
-    session.commit()
-    session.refresh(player)
-    return player
+    return
