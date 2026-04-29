@@ -14,8 +14,7 @@ def create_player(
     player_id: UUID,
     session: Session = Depends(get_session)
 ):
-    path = PLAYER_BASE_PATH + str(player_id) + ".snbt"
-    print(path)
+    path = f"{PLAYER_BASE_PATH}/{player_id}.snbt"
     snbt = get_sftp_file(path)
 
     data = parse_snbt(snbt)
@@ -29,7 +28,6 @@ def create_player(
     session.commit()
     session.refresh(player)
 
-    stats_path = STATS_BASE_PATH + str(player_id) + ".json"
     update_stats(player.player_id, session)
 
     return player
@@ -65,7 +63,7 @@ def update_player(
     player_id: UUID,
     session: Session = Depends(get_session)
 ):
-    path = PLAYER_BASE_PATH + str(player_id) + ".SNBT"
+    path = f"{PLAYER_BASE_PATH}/{player_id}.snbt"
     snbt = get_sftp_file(path)
     data = parse_snbt(snbt)
     updated_player = PlayerUpdate.model_validate(data)
@@ -96,7 +94,7 @@ def update_stats(
         player_id: UUID,
         session: Session = Depends(get_session)
 ):
-    path = STATS_BASE_PATH + str(player_id) + ".json"
+    path = f"{STATS_BASE_PATH}/{player_id}.json"
 
     player = get_player_from_db(player_id, session)
 
